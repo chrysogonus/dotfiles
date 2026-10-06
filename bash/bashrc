@@ -1,0 +1,670 @@
+# ==============================================================================
+#  Custom configuration.  Sourced from the end of the stock ~/.bashrc; see
+#  install.sh.  Machine-specific settings belong in ~/.bashrc.local.
+# ==============================================================================
+
+# Sourcing this file into a shell that still carries an older config's aliases
+# fails outright: bash expands an alias before it parses `name() {`, so a
+# leftover `alias dstop=...` turns the next function definition into a syntax
+# error and aborts the rest of the file.  Clear the names defined as functions
+# below before defining them.
+unalias __auto_venv __banner __cmd_timer_begin __fmt_duration \
+        __near_package_json __node_version __prompt_command \
+        __prompt_palette docker_cleanup drm dstop extract fname ftext \
+        git_log_enhanced gpum json_format mkcd mkproject path path_dedupe \
+        path_prepend pip python up venv 2>/dev/null
+
+# Repo root, derived from this file's own path without forking.
+__src=${BASH_SOURCE[0]}
+DOTFILES=${__src%/bash/bashrc}
+unset __src
+
+# ===== Helpers ================================================================
+
+# Collapse repeated PATH entries, keeping the first of each so precedence is
+# unchanged.  Duplicates arrive from the environment we inherit (~/.profile and
+# /etc/profile.d both push the same directories), not from this file.
+path_dedupe() {
+    local out= entry
+    local IFS=:
+    for entry in $PATH; do
+        [ -n "$entry" ] || continue
+        case ":$out:" in
+            *":$entry:"*) ;;
+            *) out=${out:+$out:}$entry ;;
+        esac
+    done
+    PATH=$out
+}
+
+# Prepend to PATH, but only if the directory exists and is not already there.
+path_prepend() {
+    [ -d "$1" ] || return 0
+    case ":$PATH:" in
+        *":$1:"*) ;;
+        *) PATH="$1:$PATH" ;;
+    esac
+}
+
+# ===== Environment ============================================================
+
+export EDITOR='vim'
+export VISUAL="$EDITOR"
+export PYTHONDONTWRITEBYTECODE=1          # keep source trees free of .pyc
+export LESS='-R -i -M'
+
+# Colored man pages: less has no color of its own, so map man's bold/underline
+# onto real colors.  GROFF_NO_SGR is required for this to work on newer groff.
+export LESS_TERMCAP_mb=$'\e[1;31m'
+export LESS_TERMCAP_md=$'\e[1;36m'
+export LESS_TERMCAP_me=$'\e[0m'
+export LESS_TERMCAP_so=$'\e[1;33;44m'
+export LESS_TERMCAP_se=$'\e[0m'
+export LESS_TERMCAP_us=$'\e[1;32m'
+export LESS_TERMCAP_ue=$'\e[0m'
+export GROFF_NO_SGR=1
+
+# ===== History ================================================================
+
+HISTCONTROL=ignoreboth:erasedups
+HISTSIZE=100000
+HISTFILESIZE=200000
+HISTTIMEFORMAT='%F %T '
+HISTIGNORE='ls:ll:la:l:d:cd:pwd:exit:clear:history:gs'
+
+shopt -s histappend cmdhist checkwinsize
+shopt -s autocd cdspell dirspell globstar extglob
+
+# ===== Prompt =================================================================
+#
+#   ╭─ user@host  ~/path  main *⇡2  py3.12  v22.23.2  1.4s  ✗1
+#   ╰─❯
+#
+# Every segment is conditional: one with nothing to say prints nothing.
+
+# Palette resolved once at startup: truecolor -> 256 -> 8 -> plain text.
+__prompt_palette() {
+    local ncolors=0
+    if command -v tput >/dev/null 2>&1; then
+        ncolors=$(tput colors 2>/dev/null) || ncolors=0
+    fi
+    case "$ncolors" in ''|*[!0-9]*) ncolors=0 ;; esac
+
+    if [ "$ncolors" -ge 8 ]; then
+        if [ "${COLORTERM:-}" = truecolor ] || [ "${COLORTERM:-}" = 24bit ]; then
+            _c_user=$'\e[38;2;125;211;252m'
+            _c_host=$'\e[38;2;103;232;249m'
+            _c_path=$'\e[38;2;147;197;253m'
+            _c_git=$'\e[38;2;250;204;21m'
+            _c_env=$'\e[38;2;134;239;172m'
+            _c_dim=$'\e[38;2;113;121;140m'
+            _c_err=$'\e[38;2;248;113;113m'
+            _c_ok=$'\e[38;2;134;239;172m'
+        elif [ "$ncolors" -ge 256 ]; then
+            _c_user=$'\e[38;5;117m'
+            _c_host=$'\e[38;5;80m'
+            _c_path=$'\e[38;5;111m'
+            _c_git=$'\e[38;5;221m'
+            _c_env=$'\e[38;5;114m'
+            _c_dim=$'\e[38;5;242m'
+            _c_err=$'\e[38;5;203m'
+            _c_ok=$'\e[38;5;114m'
+        else
+            _c_user=$'\e[1;36m'
+            _c_host=$'\e[0;36m'
+            _c_path=$'\e[1;34m'
+            _c_git=$'\e[1;33m'
+            _c_env=$'\e[1;32m'
+            _c_dim=$'\e[0;37m'
+            _c_err=$'\e[1;31m'
+            _c_ok=$'\e[1;32m'
+        fi
+        _c_off=$'\e[0m'
+    else
+        _c_user= _c_host= _c_path= _c_git= _c_env=
+        _c_dim= _c_err= _c_ok= _c_off=
+    fi
+}
+__prompt_palette
+
+# Only set the window/tab title on terminals that understand OSC 0.
+case "${TERM:-}" in
+    xterm*|rxvt*|screen*|tmux*|vte*|alacritty*|foot*|konsole*|gnome*)
+        _ps1_title='\[\e]0;\u@\h: \w\a\]' ;;
+    *)  _ps1_title= ;;
+esac
+
+# Box glyphs need UTF-8; fall back to ASCII when the locale cannot promise it.
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]*) _g_tl='╭─' _g_bl='╰─' _g_arrow='❯' _g_x='✗' ;;
+    *)              _g_tl='.-' _g_bl='`-' _g_arrow='>'  _g_x='x' ;;
+esac
+
+# Git segment: reuse git's own prompt helper rather than parsing `git branch`.
+# It understands dirty/staged/stash/untracked, ahead-behind, and the rebase,
+# merge, bisect and detached-HEAD states.
+if [ -r /usr/lib/git-core/git-sh-prompt ]; then
+    . /usr/lib/git-core/git-sh-prompt
+    GIT_PS1_SHOWDIRTYSTATE=1        # * unstaged, + staged
+    GIT_PS1_SHOWSTASHSTATE=1        # $ something stashed
+    GIT_PS1_SHOWUNTRACKEDFILES=1    # % untracked files present
+    GIT_PS1_SHOWUPSTREAM=auto       # <, >, <> against upstream
+    GIT_PS1_SHOWCONFLICTSTATE=yes
+    # If this ever drags in a very large repo, disable the costly part there:
+    #   git config bash.showUntrackedFiles false
+fi
+
+# Time the previous command.  The guard keeps the DEBUG trap from restarting
+# the clock while the prompt itself is being built.
+__cmd_start=
+__in_prompt=
+__cmd_timer_begin() {
+    [ -n "$__in_prompt" ] && return
+    [ -n "$__cmd_start" ] || __cmd_start=$SECONDS
+}
+trap '__cmd_timer_begin' DEBUG
+
+__fmt_duration() {
+    local s=$1
+    if   [ "$s" -lt 60 ];   then printf '%ds' "$s"
+    elif [ "$s" -lt 3600 ]; then printf '%dm%02ds' $((s / 60)) $((s % 60))
+    else                         printf '%dh%02dm' $((s / 3600)) $(((s % 3600) / 60))
+    fi
+}
+
+# `node -v` is a fork, so remember the answer per node binary.
+__node_bin_cache=
+__node_ver_cache=
+__node_version() {
+    local bin
+    bin=$(command -v node 2>/dev/null) || return 0
+    [ -n "$bin" ] || return 0
+    if [ "$bin" != "$__node_bin_cache" ]; then
+        __node_bin_cache=$bin
+        __node_ver_cache=$("$bin" -v 2>/dev/null)
+    fi
+    printf '%s' "$__node_ver_cache"
+}
+
+# Walk up a few levels looking for package.json, without forking.
+__near_package_json() {
+    local dir=$PWD i=0
+    while [ -n "$dir" ] && [ "$i" -lt 4 ]; do
+        [ -f "$dir/package.json" ] && return 0
+        dir=${dir%/*}
+        i=$((i + 1))
+    done
+    return 1
+}
+
+__prompt_command() {
+    local status=$?
+    __in_prompt=1
+
+    local elapsed=0
+    [ -n "$__cmd_start" ] && elapsed=$((SECONDS - __cmd_start))
+    __cmd_start=
+
+    history -a          # share history between concurrent terminals
+    __auto_venv
+
+    local sep='  ' line1 line2
+
+    # user@host -- the host is dim locally and loud over SSH, so a remote
+    # session never looks like a local one.
+    if [ -n "${SSH_CONNECTION:-}" ]; then
+        line1="\[$_c_dim\]${_g_tl}\[$_c_off\] \[$_c_user\]\u\[$_c_off\]\[$_c_dim\]@\[$_c_off\]\[$_c_err\]\h\[$_c_off\]"
+    else
+        line1="\[$_c_dim\]${_g_tl}\[$_c_off\] \[$_c_user\]\u\[$_c_off\]\[$_c_dim\]@\h\[$_c_off\]"
+    fi
+
+    line1+="${sep}\[$_c_path\]\w\[$_c_off\]"
+
+    # Left as a literal command substitution so bash evaluates it at render
+    # time -- that also stops a hostile branch name from being re-expanded.
+    if declare -F __git_ps1 >/dev/null 2>&1; then
+        line1+="\[$_c_git\]\$(__git_ps1 '${sep}%s')\[$_c_off\]"
+    fi
+
+    # Active virtualenv.  `.venv` is named after its project, not itself.
+    if [ -n "${VIRTUAL_ENV:-}" ]; then
+        local vname=${VIRTUAL_ENV##*/}
+        case "$vname" in
+            .venv|venv|env)
+                local parent=${VIRTUAL_ENV%/*}
+                vname=${parent##*/}
+                ;;
+        esac
+        vname=${vname//[^A-Za-z0-9._-]/}
+        line1+="${sep}\[$_c_env\]${vname}\[$_c_off\]"
+    fi
+
+    if __near_package_json; then
+        local nver
+        nver=$(__node_version)
+        [ -n "$nver" ] && line1+="${sep}\[$_c_env\]${nver}\[$_c_off\]"
+    fi
+
+    [ "$elapsed" -ge 2 ] && line1+="${sep}\[$_c_dim\]$(__fmt_duration "$elapsed")\[$_c_off\]"
+
+    line2="\[$_c_dim\]${_g_bl}\[$_c_off\]"
+    if [ "$status" -eq 0 ]; then
+        line2+="\[$_c_ok\]${_g_arrow}\[$_c_off\] "
+    else
+        line1+="${sep}\[$_c_err\]${_g_x}${status}\[$_c_off\]"
+        line2+="\[$_c_err\]${_g_arrow}\[$_c_off\] "
+    fi
+
+    # _ps1_title restores the xterm/tab title that the old prompt dropped.
+    PS1="${_ps1_title}${line1}\n${line2}"
+
+    __in_prompt=
+}
+
+PROMPT_COMMAND='__prompt_command'
+PROMPT_DIRTRIM=3
+PS2="\[$_c_dim\] ...\[$_c_off\] "
+
+# ===== Readline ===============================================================
+
+if [[ $- == *i* ]]; then
+    # Type a prefix, then Up/Down walks only the history that matches it.
+    bind '"\e[A": history-search-backward'
+    bind '"\e[B": history-search-forward'
+    bind 'set completion-ignore-case on'
+    bind 'set completion-map-case on'
+    bind 'set show-all-if-ambiguous on'
+    bind 'set colored-stats on'
+    bind 'set colored-completion-prefix on'
+    bind 'set mark-symlinked-directories on'
+    bind 'set bell-style none'
+fi
+
+# ===== Aliases ================================================================
+
+# Navigation
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+alias d='dirs -v'
+alias 1='cd -1'
+alias 2='cd -2'
+alias 3='cd -3'
+
+# ls
+alias ll='ls -alFh'
+alias la='ls -A'
+alias l='ls -CF'
+alias lt='ls -alFht'          # newest first
+
+# Git
+alias gs='git status'
+alias ga='git add'
+alias gc='git commit'
+alias gp='git push'
+alias gl='git log --oneline --graph --decorate'
+alias gd='git diff'
+alias gds='git diff --staged'
+alias gb='git branch'
+alias gco='git checkout'
+alias gw='git switch'
+alias gf='git fetch --all --prune'
+alias gaa='git add -A'
+alias gca='git commit --amend'
+alias gpf='git push --force-with-lease'
+alias git-prune-merged='git branch --merged | grep -vE "^\*|^[[:space:]]*(main|master|develop)$" | xargs -r git branch -d'
+
+git_log_enhanced() {
+    git log --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset' --abbrev-commit "$@"
+}
+alias glg='git_log_enhanced'
+
+# Docker
+alias dps='docker ps'
+alias dpsa='docker ps -a'
+alias dimg='docker images'
+alias dc='docker compose'
+alias dl='docker logs -f'
+
+# Stop every running container.
+dstop() {
+    local ids
+    ids=$(docker ps -q)
+    if [ -z "$ids" ]; then
+        echo "no running containers"
+        return 0
+    fi
+    docker stop $ids
+}
+
+# Remove stopped containers only -- never touches something still running.
+drm() {
+    local ids
+    ids=$(docker ps -aq --filter status=exited --filter status=created)
+    if [ -z "$ids" ]; then
+        echo "no stopped containers"
+        return 0
+    fi
+    docker rm $ids
+}
+
+docker_cleanup() {
+    docker container prune -f
+    docker image prune -f
+}
+alias dclean='docker_cleanup'
+
+# GPU / ML.  Under WSL, nvidia-smi comes from the Windows NVIDIA driver.  It may
+# exist even when GPU integration is unavailable, so gpum reports that case
+# cleanly instead of treating system RAM as GPU memory.
+alias gpu='watch -n1 nvidia-smi'
+alias gput='nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,clocks.sm --format=csv'
+
+gpum() {
+    local summary processes
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        echo 'gpum: nvidia-smi is not installed' >&2
+        return 127
+    fi
+    if ! summary=$(nvidia-smi \
+        --query-gpu=index,name,memory.used,memory.total \
+        --format=csv,noheader 2>&1); then
+        printf 'gpum: NVIDIA GPU stats are unavailable in this WSL session\n%s\n' \
+            "$summary" >&2
+        return 1
+    fi
+    printf 'GPU memory:\n'
+    while IFS= read -r line; do
+        printf '  %s\n' "$line"
+    done <<< "$summary"
+
+    printf 'compute processes:\n'
+    processes=$(nvidia-smi --query-compute-apps=pid,process_name,used_memory \
+                           --format=csv,noheader 2>/dev/null) || processes=
+    if [ -n "$processes" ]; then
+        while IFS= read -r line; do
+            printf '  %s\n' "$line"
+        done <<< "$processes"
+    else
+        echo '  (none)'
+    fi
+}
+
+alias ol='ollama'
+alias olr='ollama run'
+alias ols='ollama list'
+alias hfd='hf download'
+
+# Misc
+alias serve='python -m http.server'
+alias pytest-cov='pytest --cov=. --cov-report=term-missing'
+alias cpu='top -o %CPU'
+alias mem='top -o %MEM'
+alias df='df -h'
+alias eb='$EDITOR "$DOTFILES/bash/bashrc"'
+alias ev='$EDITOR ~/.vimrc'
+alias eg='$EDITOR ~/.gitconfig'
+
+# ===== Functions ==============================================================
+
+# Create (if needed) and activate a virtualenv.
+venv() {
+    local dir=${1:-.venv}
+    if [ ! -f "$dir/bin/activate" ]; then
+        python -m venv "$dir" || return 1
+    fi
+    . "$dir/bin/activate"
+}
+
+# `python` as a function, not an alias: an alias would win over PATH and
+# shadow the interpreter of whatever virtualenv is active.
+python() {
+    if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+        "$VIRTUAL_ENV/bin/python" "$@"
+    elif command -v python3.12 >/dev/null 2>&1; then
+        python3.12 "$@"
+    else
+        python3 "$@"
+    fi
+}
+
+pip() {
+    if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/pip" ]; then
+        "$VIRTUAL_ENV/bin/pip" "$@"
+    else
+        python -m pip "$@"
+    fi
+}
+
+# Activate the nearest .venv on entry, deactivate it on leaving.  Only ever
+# touches a venv it activated itself, so a manual `source .../activate` stands.
+__AUTO_VENV=
+__auto_venv() {
+    local dir=$PWD target=
+    while [ -n "$dir" ]; do
+        if [ -f "$dir/.venv/bin/activate" ]; then
+            target="$dir/.venv"
+            break
+        fi
+        dir=${dir%/*}
+    done
+
+    if [ -n "$target" ]; then
+        [ "${VIRTUAL_ENV:-}" = "$target" ] && return 0
+        # Someone activated a venv by hand -- leave it alone.
+        [ -n "${VIRTUAL_ENV:-}" ] && [ -z "$__AUTO_VENV" ] && return 0
+        if [ -n "$__AUTO_VENV" ]; then
+            deactivate >/dev/null 2>&1
+            __AUTO_VENV=
+        fi
+        if . "$target/bin/activate" >/dev/null 2>&1; then
+            __AUTO_VENV=$target
+        fi
+    elif [ -n "$__AUTO_VENV" ]; then
+        deactivate >/dev/null 2>&1
+        __AUTO_VENV=
+    fi
+}
+
+# Search file contents (ripgrep when available, grep otherwise).
+ftext() {
+    if command -v rg >/dev/null 2>&1; then
+        rg -i -n -w --color=auto -- "$1" .
+    else
+        grep -iRnw --color=auto -- "$1" .
+    fi
+}
+
+# Find files by name fragment.
+fname() {
+    find . -iname "*$1*"
+}
+
+mkcd() {
+    mkdir -p -- "$1" && cd -- "$1" || return
+}
+
+# Go up N directories (default 1).
+up() {
+    local n=${1:-1} path=
+    while [ "$n" -gt 0 ]; do
+        path="../$path"
+        n=$((n - 1))
+    done
+    cd "${path:-.}" || return
+}
+
+# PATH, one entry per line.
+path() {
+    printf '%s\n' "${PATH//:/$'\n'}"
+}
+
+extract() {
+    if [ ! -f "$1" ]; then
+        echo "extract: '$1' is not a file" >&2
+        return 1
+    fi
+    case "$1" in
+        *.tar.bz2|*.tbz2) tar xjf   "$1" ;;
+        *.tar.gz|*.tgz)   tar xzf   "$1" ;;
+        *.tar.xz|*.txz)   tar xJf   "$1" ;;
+        *.tar.zst)        tar --zstd -xf "$1" ;;
+        *.tar)            tar xf    "$1" ;;
+        *.bz2)            bunzip2   "$1" ;;
+        *.gz)             gunzip    "$1" ;;
+        *.xz)             unxz      "$1" ;;
+        *.zip)            unzip     "$1" ;;
+        *.7z)             7z x      "$1" ;;
+        *.rar)            unrar x   "$1" ;;
+        *.Z)              uncompress "$1" ;;
+        *) echo "extract: don't know how to extract '$1'" >&2; return 1 ;;
+    esac
+}
+
+# Scaffold a new project.
+mkproject() {
+    mkdir -p "$1" || return 1
+    cd "$1" || return 1
+    git init -q
+    touch README.md .gitignore
+    mkdir -p src tests
+    echo "Project $1 created!"
+}
+
+json_format() {
+    if [ -p /dev/stdin ]; then
+        python -m json.tool
+    else
+        python -m json.tool "$1"
+    fi
+}
+alias jf='json_format'
+
+# ===== PATH and toolchains ====================================================
+
+path_prepend "$HOME/bin"
+path_prepend "$HOME/.local/bin"
+
+# nvm.  Sourcing nvm.sh is relatively slow, so put the default Node on PATH
+# directly and defer the real thing until an nvm subcommand is actually used.
+export NVM_DIR="$HOME/.nvm"
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+    __nvm_default=
+    [ -r "$NVM_DIR/alias/default" ] && read -r __nvm_default < "$NVM_DIR/alias/default"
+    case "$__nvm_default" in
+        v*) [ -d "$NVM_DIR/versions/node/$__nvm_default/bin" ] &&
+                path_prepend "$NVM_DIR/versions/node/$__nvm_default/bin" ;;
+        ?*) for __d in "$NVM_DIR/versions/node/v$__nvm_default".*/bin; do
+                [ -d "$__d" ] && __nvm_bin=$__d
+            done
+            [ -n "${__nvm_bin:-}" ] && path_prepend "$__nvm_bin"
+            unset __d __nvm_bin ;;
+    esac
+    unset __nvm_default
+
+    nvm() {
+        unset -f nvm
+        . "$NVM_DIR/nvm.sh"
+        [ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"
+        nvm "$@"
+    }
+fi
+
+# fnm (no-op unless installed)
+FNM_PATH="$HOME/.local/share/fnm"
+if [ -d "$FNM_PATH" ]; then
+    path_prepend "$FNM_PATH"
+    eval "$(fnm env)"
+fi
+
+# pnpm
+export PNPM_HOME="$HOME/.local/share/pnpm"
+path_prepend "$PNPM_HOME"
+path_prepend "$PNPM_HOME/bin"
+
+path_dedupe
+export PATH
+
+# Completions for the tools this machine actually leans on.
+for __c in git docker make ssh; do
+    [ -r "/usr/share/bash-completion/completions/$__c" ] &&
+        . "/usr/share/bash-completion/completions/$__c"
+done
+unset __c
+
+# fzf: Ctrl-R fuzzy history, Ctrl-T file picker, Alt-C directory jump.
+if command -v fzf >/dev/null 2>&1; then
+    export FZF_DEFAULT_OPTS='--height 40% --layout=reverse --border=rounded --info=inline'
+    command -v rg >/dev/null 2>&1 &&
+        export FZF_CTRL_T_COMMAND='rg --files --hidden --glob "!.git"'
+    eval "$(fzf --bash)"
+fi
+
+# Turn off the terminal bell, but only where there is an X display to ask.
+if [ -n "${DISPLAY:-}" ] && command -v xset >/dev/null 2>&1; then
+    xset b off >/dev/null 2>&1 || :
+fi
+
+# ===== Startup banner =========================================================
+
+__banner() {
+    local kern arch mem_total mem_avail
+    read -r kern < /proc/sys/kernel/osrelease
+    arch=${MACHTYPE%%-*}
+
+    while read -r k v _; do
+        case $k in
+            MemTotal:)     mem_total=$v ;;
+            MemAvailable:) mem_avail=$v ;;
+        esac
+    done < /proc/meminfo
+
+    printf '\n  %s%s%s %s%s · %s%s\n' \
+        "$_c_user" "${HOSTNAME}" "$_c_off" "$_c_dim" "$kern" "$arch" "$_c_off"
+
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        local gpu_stats name util gpu_used gpu_total temp power
+        if gpu_stats=$(nvidia-smi \
+                --query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw \
+                --format=csv,noheader,nounits 2>/dev/null); then
+            IFS=, read -r name util gpu_used gpu_total temp power <<< "$gpu_stats"
+            printf '  %s%s%s%s %s%% · %s/%s MiB · %s°C · %sW%s\n' \
+                "$_c_env" "${name# }" "$_c_off" "$_c_dim" "${util# }" \
+                "${gpu_used# }" "${gpu_total# }" "${temp# }" "${power# }" "$_c_off"
+        fi
+    fi
+
+    printf '  %smemory%s %d/%d GiB   %sdisk%s %s free on /\n' \
+        "$_c_dim" "$_c_off" $(((mem_total - mem_avail) / 1048576)) $((mem_total / 1048576)) \
+        "$_c_dim" "$_c_off" "$(df -h --output=avail / | tail -1 | tr -d ' ')"
+
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        local branch changed
+        branch=$(git branch --show-current 2>/dev/null)
+        changed=$(git status --porcelain 2>/dev/null | wc -l)
+        printf '  %srepo%s %s on %s%s%s · %s change(s)\n' \
+            "$_c_dim" "$_c_off" "${PWD##*/}" \
+            "$_c_git" "${branch:-detached}" "$_c_off" "$changed"
+    fi
+    printf '\n'
+}
+
+# Top-level interactive shells only: never inside scripts, subshells, or a
+# terminal that cannot render it.  SSH sessions DO get the banner -- this box
+# is normally reached over Remote-SSH, so skipping them would hide it always.
+# Set BASHRC_NO_BANNER=1 to turn it off.
+# SHLVL is unreliable here (bash increments it before this file runs), so use
+# an exported marker instead: it is unset in a fresh terminal and inherited by
+# every nested shell, which is exactly the distinction we want.
+if [[ $- == *i* ]] && [ -z "${__BANNER_SHOWN:-}" ] &&
+   [ -z "${BASHRC_NO_BANNER:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
+    export __BANNER_SHOWN=1
+    __banner
+fi
+
+# Jump into workspace
+[ "$PWD" = "$HOME" ] && [ -d ~/workspace ] && cd ~/workspace
+
+# Per-machine settings (paths, work-only aliases, anything private).  Never
+# committed.
+[ -r "$HOME/.bashrc.local" ] && . "$HOME/.bashrc.local"
